@@ -2,11 +2,11 @@ import { Elysia, t } from "elysia";
 import "dotenv/config";
 
 const CONFIG = {
-  PORT: process.env.WORKFLOWS_PORT || 9092,
-  UPSTREAM_BASE: process.env.WORKFLOWS_UPSTREAM_BASE || 'http://localhost:9090',
-  BEARER_TOKEN: process.env.WORKFLOWS_BEARER_TOKEN || 'abc',
-  BASIC_AUTH: process.env.WORKFLOWS_BASIC_AUTH, // Eg. 'username:password'
-  DRY_RUN: process.env.WORKFLOWS_DRY_RUN === 'true',
+  PORT: process.env.WORKFLOWS_PROXY_PORT || 9092,
+  UPSTREAM_BASE: process.env.WORKFLOWS_PROXY_UPSTREAM_BASE || 'http://localhost:9090',
+  BEARER_TOKEN: process.env.WORKFLOWS_PROXY_BEARER_TOKEN || 'abc',
+  BASIC_AUTH: process.env.WORKFLOWS_PROXY_BASIC_AUTH, // Eg. 'username:password'
+  DRY_RUN: process.env.WORKFLOWS_PROXY_DRY_RUN === 'true',
   ALLOWED_METHODS: new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']),
 }
 

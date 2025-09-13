@@ -1,0 +1,59 @@
+volumes:
+  kestra-data:
+    driver: local
+services:
+  kestra:
+    image: kestra/kestra:latest
+    pull_policy: always
+    user: "root"
+    command: server standalone
+    volumes:
+      - kestra-data:/app/storage
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/kestra-wd:/tmp/kestra-wd
+    env_file:
+      - .env
+    environment:
+      KESTRA_CONFIGURATION: |
+        datasources:
+          postgres:
+            url: ${KESTRA_DB_URL}
+            driverClassName: org.postgresql.Driver
+            username: ${KESTRA_DB_USERNAME}
+            password: ${KESTRA_DB_PASSWORD}
+        kestra:
+          server:
+            basicAuth:
+              username: ${KESTRA_USER}
+              password: ${KESTRA_PASSWORD}
+          repository:
+            type: postgres
+          storage:
+            type: local
+            local:
+              basePath: "/app/storage"
+          queue:
+            type: postgres
+          tasks:
+            tmpDir:
+              path: /tmp/kestra-wd/tmp
+          url: ${KESTRA_URL}
+    ports:
+      - "9090:8080"
+      - "9091:8081"
+    depends_on: []
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  workflows_proxy:
+    build:
+      context: ./workflows_proxy
+      dockerfile: Dockerfile
+    env_file:
+      - ./.env
+    ports:
+      - "9092:9092"
+    depends_on:
+      - kestra
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

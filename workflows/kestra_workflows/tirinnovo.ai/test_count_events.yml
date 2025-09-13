@@ -1,0 +1,24 @@
+id: test__count_events
+namespace: tirinnovo.ai
+
+tasks:
+  - id: fetch_events
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: "{{ envs.app_db_url }}"
+    username: "{{ envs.app_db_username }}"
+    password: "{{ secret(key='APP_DB_PASSWORD') }}"
+    sql: |
+      SELECT
+        id, event_date_is_datetime, event_date_tz, inspection_report, lat, lon,
+        regexp_replace(message, 'data:[^"]*', '[data removed]', 'g') as message,
+        metadata, recorded_at, resolved, subject, weather, created_by_id, created_at, updated_at
+      FROM events
+      WHERE
+        (
+          discarded_at IS NULL
+        )
+      LIMIT 20;
+
+  - id: log_result
+    type: io.kestra.core.tasks.log.Log
+    message: "{{ outputs.fetch_events.rows }}"

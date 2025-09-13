@@ -1,0 +1,222 @@
+id: events_summarizer
+namespace: tirinnovo.ai
+
+inputs:
+  - id: user_request
+    type: STRING
+    defaults: Summarize all events
+  - id: organization_id
+    type: STRING
+    defaults: 'ca6c16f4-cf0f-44c2-8c51-f3698f161748' # st
+  - id: project_id
+    type: STRING
+    defaults: '4ab47a83-5313-4939-bd1d-71bb21f1f299'
+  - id: locale
+    type: STRING
+    defaults: 'IT'
+  - id: batch_size
+    type: INT
+    defaults: 50
+
+tasks:
+  - id: count_events
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: "{{ envs.app_db_url }}"
+    username: "{{ envs.app_db_username }}"
+    password: "{{ secret(key='APP_DB_PASSWORD') }}"
+    sql: |
+      SELECT COUNT(*) as total_count
+      FROM events
+      WHERE
+        agency_id = '{{ inputs.organization_id }}' AND
+        project_id = '{{ inputs.project_id }}' AND
+        (
+          discarded_at IS NULL
+        )
+    fetch: true
+
+  - id: calculate_batches
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      image: python:3.11-slim
+    beforeCommands:
+      - pip install --no-cache-dir --quiet kestra
+    script: |
+      from kestra import Kestra
+      import math
+
+      total_count = {{ outputs.count_events.rows[0].total_count }}
+      batch_size = {{ inputs.batch_size }}
+
+      num_batches = math.ceil(total_count / batch_size) if total_count > 0 else 0
+
+      # print(f"Total events: {total_count}")
+      # print(f"Batch size: {batch_size}")
+      # print(f"Number of batches: {num_batches}")
+
+      # Create batch parameters
+      batches = []
+      for i in range(num_batches):
+        offset = i * batch_size
+        batches.append({
+          "batch_id": i,
+          "offset": offset,
+          "limit": batch_size
+        })
+      data = dict()
+      Kestra.outputs({ "batches": batches, "num_batches": num_batches, "total_count": total_count })
+
+  - id: log_batch_info
+    type: io.kestra.plugin.core.log.Log
+    message: "Will process {{ outputs.calculate_batches.vars.total_count }} events in {{ outputs.calculate_batches.vars.num_batches }} batches of {{ inputs.batch_size }}"
+
+  - id: process_batches
+    type: io.kestra.plugin.core.flow.ForEach
+    values: "{{ outputs.calculate_batches.vars.batches }}"
+    concurrencyLimit: 3
+    tasks:
+      - id: fetch_batch_rows
+        type: io.kestra.plugin.jdbc.postgresql.Query
+        url: "{{ envs.app_db_url }}"
+        username: "{{ envs.app_db_username }}"
+        password: "{{ secret(key='APP_DB_PASSWORD') }}"
+        sql: |
+          SELECT
+            id, event_date_is_datetime, event_date_tz, inspection_report, lat, lon,
+            regexp_replace(message, 'data:[^"]*', '[data removed]', 'g') as message,
+            metadata, recorded_at, resolved, subject, weather, created_by_id, created_at, updated_at
+          FROM events
+          WHERE
+            agency_id = '{{ inputs.organization_id }}' AND
+            project_id = '{{ inputs.project_id }}' AND
+            (
+              discarded_at IS NULL
+            )
+          ORDER BY event_date ASC
+          LIMIT {{ fromJson(taskrun.value).limit }}
+          OFFSET {{ fromJson(taskrun.value).offset }}
+        fetch: true
+
+      - id: batch_summary
+        type: io.kestra.plugin.gemini.StructuredOutputCompletion
+        apiKey: "{{ secret('GOOGLE_GEMINI_KEY') | trim }}"
+        model: "gemini-2.5-flash-preview-05-20"
+        prompt: |
+          # Summarize construction site events
+
+          ## Role
+
+          You are a professional summarization assistant for construction site diaries.
+
+          ## Task
+
+          Create a concise summary of the provided construction site events based on the user's request.
+
+          - **Accuracy:** Do not infer or invent information. Base the summary strictly on the provided events.
+          - **Citations:** Include event dates as references for key points. For example: "A main bathroom wall leak was reported on May 23, 2020."
+          - Unless requested, avoid returning IDs
+
+          ## User Request
+
+          {{ inputs.user_request }}
+
+          ## Events
+
+          ```json
+          {{ outputs.fetch_batch_rows[taskrun.value].rows }}
+          ```
+
+          ## Expected Output
+
+          - **Format:** Return only a JSON object. No conversational text or explanations.
+          - **Structure:** The JSON must have a single key, `"summary"`, with a string value containing the summary. Use newline characters (`\n`) for formatting within the string.
+          - Generate the summary in the following locale: "{{ inputs.locale }}"
+          - This is Batch {{ fromJson(taskrun.value).batch_id }} with offset {{ fromJson(taskrun.value).offset }}
+
+          ```json
+          { "summary": "The summary here." }
+          ```
+        jsonResponseSchema: |
+          {
+              "type": "object",
+              "properties": {
+                  "summary": {
+                      "type": "string"
+                  }
+              }
+          }
+
+      - id: log_batch_rows_completed
+        type: io.kestra.plugin.core.log.Log
+        message: "Batch {{ fromJson(taskrun.value).batch_id }} (offset: {{ fromJson(taskrun.value).offset }}): {{ outputs.fetch_batch_rows[taskrun.value].rows | length }} rows completed"
+
+  - id: final_summary
+    type: io.kestra.plugin.gemini.StructuredOutputCompletion
+    apiKey: "{{ secret('GOOGLE_GEMINI_KEY') | trim }}"
+    model: "gemini-2.5-flash-preview-05-20"
+    prompt: |
+      # Final Summary
+
+      ## Role
+
+      You are a professional summarization assistant for construction site diaries.
+
+      ## Task
+
+      You have been provided with {{ outputs.calculate_batches.vars.num_batches }} batch summaries from a construction site diary.
+      Create a comprehensive final summary that consolidates all the batch summaries while addressing the user's original request.
+
+      ## Instructions
+
+      - **Consolidation:** Merge information from all batches into a coherent, comprehensive summary
+      - **Chronological Order:** Maintain chronological flow where relevant
+      - **Remove Redundancy:** Eliminate duplicate information across batches
+      - **Preserve Citations:** Keep important date references from the batch summaries
+      - **Completeness:** Ensure the final summary captures the full scope of events across all batches
+
+      ## User's Original Request
+
+      {{ inputs.user_request }}
+
+      ## Batch Summaries to Consolidate
+
+      {% for el in outputs.batch_summary %}
+      ### BATCH "{{fromJson(el.key).batch_id}}"
+
+      {{ fromJson(el.value.predictions[0]).summary }}
+
+      {% endfor %}
+
+      ## Total Events Processed
+
+      {{ outputs.calculate_batches.vars.total_count }} events across {{ outputs.calculate_batches.vars.num_batches }} batches
+
+      ## Expected Output
+
+      - **Format:** Return only a JSON object. No conversational text or explanations.
+      - **Structure:** The JSON must have a single key, `"final_summary"`, with a string value containing the consolidated summary.
+      - Generate the summary in the following locale: "{{ inputs.locale }}"
+
+      ```json
+      { "final_summary": "The comprehensive final summary here." }
+      ```
+    jsonResponseSchema: |
+      {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "string"
+          }
+        }
+      }
+outputs:
+  - id: total_events_processed
+    type: INT
+    value: "{{ outputs.calculate_batches.vars.total_count }}"
+  - id: batches_processed
+    type: INT
+    value: "{{ outputs.calculate_batches.vars.num_batches }}"
+  - id: final_summary
+    type: STRING
+    value: "{{ fromJson(outputs.final_summary.predictions[0]).summary }}"

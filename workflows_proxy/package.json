@@ -1,5 +1,5 @@
 {
-  "name": "example_workflows",
+  "name": "example_workflows_proxy",
   "version": "1.0.50",
   "scripts": {
     "start": "bun src/index.ts",
