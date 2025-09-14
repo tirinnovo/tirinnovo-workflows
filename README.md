@@ -4,6 +4,10 @@
 
 This project loads Kestra to allow orchestration of workflows, such as deep AI analysis.
 
+Please read the guides:
+
+- [Workflows Proxy](workflows_proxy/README.md)
+
 ## Examples of summarizations
 
 - "Extract from this construction site diary events our company's best parctices so new junior architects and surveyors know what to do when joining our studio."

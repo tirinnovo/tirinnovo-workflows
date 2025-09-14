@@ -49,7 +49,7 @@ const app = new Elysia()
         upstreamHeaders.set("Authorization", basicAuth);
       }
 
-      const requestOptions: RequestInit = {
+      const requestOptions = {
         method,
         headers: upstreamHeaders,
       };
@@ -69,35 +69,59 @@ const app = new Elysia()
           requestOptions.body = new URLSearchParams(payload).toString();
         } else if (contentType?.includes("multipart/form-data")) {
           const formData = new FormData();
-          for (const key in payload) {
-            if (Object.prototype.hasOwnProperty.call(payload, key)) {
-              const value = payload[key];
+
+          // Handle different payload structures
+          if (typeof payload === 'object' && payload !== null) {
+            for (const [key, value] of Object.entries(payload)) {
               if (value instanceof File) {
                 formData.append(key, value, value.name);
+              } else if (value instanceof Blob) {
+                formData.append(key, value);
+              } else if (Array.isArray(value)) {
+                // Handle array values (multiple values for same key)
+                value.forEach(item => {
+                  if (item instanceof File) {
+                    formData.append(key, item, item.name);
+                  } else if (item instanceof Blob) {
+                    formData.append(key, item);
+                  } else {
+                    formData.append(key, String(item));
+                  }
+                });
               } else {
                 formData.append(key, String(value));
               }
             }
           }
+
           requestOptions.body = formData;
-          // Remove Content-Type to let fetch set it with boundary
+          // Remove Content-Type header to let fetch set it with proper boundary
           upstreamHeaders.delete("Content-Type");
         } else {
-          // Fallback for other content types
-          requestOptions.body = String(payload);
+          // Fallback for other content types or when no content-type specified
+          if (typeof payload === 'object') {
+            // Try to JSON stringify objects if no content type is specified
+            upstreamHeaders.set("Content-Type", "application/json");
+            requestOptions.body = JSON.stringify(payload);
+          } else {
+            requestOptions.body = String(payload);
+          }
         }
       }
 
       // 4. Forward the request
       console.log(`Forwarding request to: ${upstreamUrl}`);
+      console.log(`Method: ${method}`);
+      console.log(`Headers:`, Object.fromEntries(upstreamHeaders.entries()));
+
       if (CONFIG.DRY_RUN) {
         return {
           status: "Dry run successful",
           upstreamUrl,
-          requestOptions: {
-            ...requestOptions,
-            headers: Object.fromEntries(upstreamHeaders.entries())
-          },
+          method,
+          headers: Object.fromEntries(upstreamHeaders.entries()),
+          hasBody: !!requestOptions.body,
+          bodyType: requestOptions.body?.constructor?.name || 'undefined'
         };
       }
 

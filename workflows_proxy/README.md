@@ -10,8 +10,7 @@ As atm we can't afford their Pro plan, this middleware will allow us to guard th
 bun install
 cp ../.env.example ../.env
 # (fix the env vars)
-source ../.env
-bun run src/index.ts
+( set -a; source ../.env; set +a; bun run src/index.ts )
 ```
 
 ## Tunnelling
@@ -29,8 +28,8 @@ cloudflared tunnel run tirinnovo-proxy
 ## Call
 
 ```sh
-curl -v -X POST \
-  -H "Authorization: Bearer abc" \
+curl -i \
+  -H "Authorization: Bearer $WORKFLOWS_PROXY_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/api/v1/main/executions/tirinnovo.ai/test__count_events",

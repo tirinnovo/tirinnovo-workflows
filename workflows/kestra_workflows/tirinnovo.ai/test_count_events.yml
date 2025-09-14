@@ -1,6 +1,19 @@
 id: test__count_events
 namespace: tirinnovo.ai
 
+inputs:
+  - id: message
+    type: STRING
+    defaults: This is the message
+
+  - id: organization_id
+    type: STRING
+    defaults: '-'
+
+  - id: room_id
+    type: STRING
+    defaults: '-'
+
 tasks:
   - id: fetch_events
     type: io.kestra.plugin.jdbc.postgresql.Query
@@ -18,7 +31,18 @@ tasks:
           discarded_at IS NULL
         )
       LIMIT 20;
+    fetchType: FETCH
 
   - id: log_result
-    type: io.kestra.core.tasks.log.Log
+    type: io.kestra.plugin.core.log.Log
     message: "{{ outputs.fetch_events.rows }}"
+
+  - id: post_message_to_webhook
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ envs.tirinnovo_web_domain }}/api/hooks/ai_response"
+    method: POST
+    headers:
+      Authorization: Bearer {{ secret(key='AI_WEBHOOK_API_TOKEN') }}
+      Content-Type: application/json
+    body: |
+      { "organization_id": "{{ inputs.organization_id }}", "room_id": "{{ inputs.room_id }}", "message": {{ inputs.message | toJson }}, "metadata": { "event_rows": {{ outputs.fetch_events.rows | toJson }} } }
