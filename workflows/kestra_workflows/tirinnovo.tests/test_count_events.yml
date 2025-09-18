@@ -1,5 +1,5 @@
-id: test__count_events
-namespace: tirinnovo.ai
+id: test_count_events
+namespace: tirinnovo.tests
 
 inputs:
   - id: message

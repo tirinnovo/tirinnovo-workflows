@@ -1,0 +1,47 @@
+id: test_wait_for_approval
+namespace: tirinnovo.tests
+
+inputs:
+  - id: request.name
+    type: STRING
+    defaults: Rick Astley
+
+tasks:
+  - id: send_approval_request
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Head to this place:
+      - http://localhost:9090/api/v1/executions/{{execution.id}}/resume
+      (pausing...)
+
+  - id: wait_for_approval
+    type: io.kestra.plugin.core.flow.Pause
+    onResume:
+      - id: is_approved
+        description: Whether to approve the request
+        type: BOOLEAN
+        defaults: true
+      - id: reason
+        description: Reason for approval or rejection
+        type: STRING
+        defaults: Well-deserved vacation
+      - id: approver
+        description: The name of the person approving the request
+        type: STRING
+        defaults: John Doe
+
+  # Call via API:
+  # curl -u 'aa:bb' -X POST -F 'is_approved=true' -F 'reason=GoodLad' -F 'approver=Jane' 'http://localhost:9090/api/v1/executions/HOoXLzGYKgyhzVPZZT6j0/resume'
+
+  - id: handle_approval_or_rejection
+    type: io.kestra.plugin.core.flow.Switch
+    value: "{{ outputs.wait_for_approval.onResume.is_approved }}"
+    cases:
+      true:
+        - id: approve
+          type: io.kestra.plugin.core.log.Log
+          message: "The vacation request for {{ inputs.request.name }} has been approved by {{ outputs.wait_for_approval.onResume.approver }}. Reason: {{ outputs.wait_for_approval.onResume.reason }}"
+      false:
+        - id: reject
+          type: io.kestra.plugin.core.log.Log
+          message: "The vacation request for {{ inputs.request.name }} has been rejected by {{ outputs.wait_for_approval.onResume.approver }}. Reason: {{ outputs.wait_for_approval.onResume.reason }}"

@@ -1,0 +1,274 @@
+id: events_analyzer
+namespace: tirinnovo.ai
+description: Analyzes and responds to user queries about construction project events.
+
+# curl -v -X POST -H 'Content-Type: multipart/form-data' -F 'user_request=quali sono le persone coinvolte?' -F 'organization_id=9a4e6bd5-cbd6-4f16-ba74-8e9bde1bd405' -F 'room_id=a5491924-1b3f-45e8-b7e6-4b3116c3fe32' -F 'project_id=4ab47a83-5313-4939-bd1d-71bb21f1f299' -F 'locale=IT' -F 'batch_size=25' 'http://localhost:9090/api/v1/main/executions/tirinnovo.ai/events_analyzer'
+
+inputs:
+  - id: user_request
+    type: STRING
+    defaults: Summarize all events
+  - id: organization_id
+    type: STRING
+  - id: room_id
+    type: STRING
+  - id: project_id
+    type: STRING
+  - id: locale
+    type: STRING
+    defaults: IT
+  - id: batch_size
+    type: INT
+    defaults: 25
+
+tasks:
+  - id: count_events
+    type: io.kestra.plugin.jdbc.postgresql.Query
+    url: "{{ envs.app_db_url }}"
+    username: "{{ envs.app_db_username }}"
+    password: "{{ secret(key='APP_DB_PASSWORD') }}"
+    sql: |
+      SELECT COUNT(*) as total_count
+      FROM events
+      WHERE
+        agency_id = '{{ inputs.organization_id }}' AND
+        project_id = '{{ inputs.project_id }}' AND
+        discarded_at IS NULL
+    fetch: true
+
+  - id: calculate_batches
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      image: "python:3.11-slim"
+    beforeCommands:
+      - pip install --no-cache-dir --quiet kestra
+    script: |
+      from kestra import Kestra
+      import math
+
+      total_count = {{ outputs.count_events.rows[0].total_count }}
+      batch_size = {{ inputs.batch_size }}
+
+      num_batches = math.ceil(total_count / batch_size) if total_count > 0 else 0
+
+      batches = []
+      for i in range(num_batches):
+        offset = i * batch_size
+        batches.append({
+          "batch_id": i,
+          "offset": offset,
+          "limit": batch_size
+        })
+      Kestra.outputs({ "batches": batches, "num_batches": num_batches, "total_count": total_count })
+
+  - id: log_batch_info
+    type: io.kestra.plugin.core.log.Log
+    message: >-
+      Will process {{ outputs.calculate_batches.vars.total_count }} events in {{
+      outputs.calculate_batches.vars.num_batches }} batches of {{
+      inputs.batch_size }}
+  - id: process_batches
+    type: io.kestra.plugin.core.flow.ForEach
+    values: "{{ outputs.calculate_batches.vars.batches }}"
+    concurrencyLimit: 3
+    tasks:
+      - id: fetch_batch_rows
+        type: io.kestra.plugin.jdbc.postgresql.Query
+        url: "{{ envs.app_db_url }}"
+        username: "{{ envs.app_db_username }}"
+        password: "{{ secret(key='APP_DB_PASSWORD') }}"
+        sql: |
+          SELECT
+            id, event_date_is_datetime, event_date_tz, inspection_report, lat, lon,
+            regexp_replace(message, 'data:[^"]*', '[data removed]', 'g') AS message,
+            metadata, recorded_at, resolved, subject, weather, created_by_id, created_at, updated_at
+          FROM events
+          WHERE
+            agency_id = '{{ inputs.organization_id }}' AND
+            project_id = '{{ inputs.project_id }}' AND
+            discarded_at IS NULL
+          ORDER BY event_date ASC
+          LIMIT {{ fromJson(taskrun.value).limit }}
+          OFFSET {{ fromJson(taskrun.value).offset }}
+        fetch: true
+
+      - id: batch_analysis
+        type: io.kestra.plugin.gemini.StructuredOutputCompletion
+        apiKey: "{{ secret('GOOGLE_GEMINI_KEY') | trim }}"
+        model: gemini-2.5-flash-preview-05-20
+        prompt: |
+          # Construction Site Diary Analyst
+
+          ## Role
+
+          You are a specialized AI assistant for analyzing construction site
+          diaries. Your purpose is to understand user requests and extract or
+          summarize relevant information from the provided data.
+
+          ## Task
+
+          Analyze the provided JSON data of construction site events based on
+          the user's request.
+
+          - **Accuracy:** Respond strictly based on the provided events. Do not
+          guess or invent information.
+
+          - **Language:** The output must be in the specified locale: "{{
+          inputs.locale }}".
+
+          - **Output Format:** Return only a JSON object. No conversational text
+          or explanations. The JSON must have a single key, `"result"`, with a
+          string value containing the response.
+
+          ## User Request
+
+          {{ inputs.user_request }}
+
+          ## Events
+
+          ```json
+          {{ outputs.fetch_batch_rows[taskrun.value].rows }}
+          ```
+
+          ## Expected Output
+
+          ```json
+
+          { "result": "Your detailed analysis, summary, or answer here, formatted with Markdown." }
+
+          ```
+        jsonResponseSchema: |-
+          {
+              "type": "object",
+              "properties": {
+                  "result": {
+                      "type": "string"
+                  }
+              }
+          }
+
+      - id: log_batch_rows_completed
+        type: io.kestra.plugin.core.log.Log
+        message: >-
+          Batch {{ fromJson(taskrun.value).batch_id }}
+          (offset: {{ fromJson(taskrun.value).offset }}):
+            {{ outputs.fetch_batch_rows[taskrun.value].rows | length }} rows completed
+
+  - id: final_analysis
+    type: io.kestra.plugin.gemini.StructuredOutputCompletion
+    apiKey: '{{ secret(''GOOGLE_GEMINI_KEY'') | trim }}'
+    model: gemini-2.5-flash-preview-05-20
+    prompt: >
+      # Final Consolidation
+
+      You are a professional summarization and analysis assistant specializing in construction management and site operations.
+      You will be analyzing and consolidating information from **construction site diaries and daily journals**.
+
+      ## Task
+
+      Consolidate the provided partial analyses from different data batches into a single, comprehensive final answer.
+
+      The final answer should be a **concise, well-structured summary of daily site activities, issues, and progress**.
+      Use Markdown formatting such as headings, lists, and bold text to ensure the final output is easy to read and understand.
+
+      ## Instructions
+
+      - **Consolidation:** Merge the information from all partial analyses
+      into a single, cohesive response.
+
+      - **Formatting:** Use Markdown to create a human-readable, nicely
+      formatted response. Include lists for enumerations and headings for
+      different sections.
+
+      - **Clarity:** The final response should directly and clearly answer the
+      user's original request.
+
+      - **Language:** The output must be in the specified locale: "{{
+      inputs.locale }}".
+
+      ## User's Original Request
+
+      {{ inputs.user_request }}
+
+      ## Partial Analyses to Consolidate
+
+      {% for el in outputs.batch_analysis %}
+
+      ### BATCH "{{ fromJson(el.key).batch_id }}"
+
+      {{ fromJson(el.value.predictions[0]).result }}
+
+      {% endfor %}
+
+      ## Total Events Processed
+
+      {{ outputs.calculate_batches.vars.total_count }} events across {{
+      outputs.calculate_batches.vars.num_batches }} batches.
+
+      ## Expected Output
+
+      - **Format:** Return only a JSON object. No conversational text or
+      explanations.
+
+      - **Structure:** The JSON must have a single key, `"final_result"`, with a
+      string value containing the consolidated response, formatted with
+      Markdown.
+
+      ```json
+      { "final_result": "Your comprehensive final response here, formatted with Markdown." }
+      ```
+    jsonResponseSchema: |-
+      {
+          "type": "object",
+          "properties": {
+              "final_result": {
+                  "type": "string"
+              }
+          }
+      }
+
+  - id: post_message_to_webhook
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ envs.tirinnovo_web_domain }}/api/hooks/ai_response"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ secret(key='AI_WEBHOOK_API_TOKEN') }}"
+      Content-Type: application/json
+    body: >-
+      {
+        "organization_id": "{{ inputs.organization_id }}",
+        "room_id": "{{ inputs.room_id }}",
+        "message": {{ outputs.final_analysis.predictions[0] | jq('.final_result') | first | toJson }},
+        "metadata": {
+          "events": {{ outputs.count_events.rows[0].total_count }}
+        }
+      }
+
+errors:
+  - id: alert_on_failure
+    type: io.kestra.plugin.core.http.Request
+    uri: "{{ envs.tirinnovo_web_domain }}/api/hooks/ai_response"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ secret(key='AI_WEBHOOK_API_TOKEN') }}"
+      Content-Type: application/json
+    body: >-
+      {
+        "organization_id": "{{ inputs.organization_id }}",
+        "room_id": "{{ inputs.room_id }}", "message": "<ERROR>",
+        "metadata": {
+          "error": "Failed flow: {{ flow.namespace }}.{{ flow.id }} with ID {{ execution.id }}"
+        }
+      }
+
+outputs:
+  - id: total_events_processed
+    type: INT
+    value: "{{ outputs.calculate_batches.vars.total_count }}"
+  - id: batches_processed
+    type: INT
+    value: "{{ outputs.calculate_batches.vars.num_batches }}"
+  - id: final_summary
+    type: STRING
+    value: "{{ outputs.final_analysis.predictions[0] | jq('.final_result') | first }}"
